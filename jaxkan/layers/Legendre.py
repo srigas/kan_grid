@@ -1,0 +1,601 @@
+import jax
+import jax.numpy as jnp
+
+from flax import nnx
+
+from typing import Union
+
+from .utils import solve_full_lstsq
+
+
+# Dictionary of Legendre polynomials up to degree 20
+Lg = {
+    0: lambda x: jnp.ones_like(x),
+    1: lambda x: x,
+    2: lambda x: (1/2) * (3 * x**2 - 1),
+    3: lambda x: (1/2) * (5 * x**3 - 3 * x),
+    4: lambda x: (1/8) * (35 * x**4 - 30 * x**2 + 3),
+    5: lambda x: (1/8) * (63 * x**5 - 70 * x**3 + 15 * x),
+    6: lambda x: (1/16) * (231 * x**6 - 315 * x**4 + 105 * x**2 - 5),
+    7: lambda x: (1/16) * (429 * x**7 - 693 * x**5 + 315 * x**3 - 35*x),
+    8: lambda x: (1/128) * (6435 * x**8 - 12012 * x**6 + 6930 * x**4 - 1260 * x**2 + 35),
+    9: lambda x: (1/128) * (12155 * x**9 - 25740 * x**7 + 18018 * x**5 - 4620 * x**3 + 315 * x),
+    10: lambda x: (1/256) * (46189 * x**10 - 109395 * x**8 + 90090 * x**6 - 30030 * x**4 + 3465 * x**2 - 63),
+    11: lambda x: (1/256) * (88179 * x**11 - 230945 * x**9 + 218790 * x**7 - 90090 * x**5 + 15015 * x**3 - 693 * x),
+    12: lambda x: (1/1024) * (676039 * x**12 - 1939938 * x**10 + 2078505 * x**8 - 1021020 * x**6 + 225225 * x**4 - 18018 * x**2 + 231),
+    13: lambda x: (1/1024) * (1300075 * x**13 - 4056234 * x**11 + 4849845 * x**9 - 2771340 * x**7 + 765765 * x**5 - 90090 * x**3 + 3003 * x),
+    14: lambda x: (1/2048) * (5014575 * x**14 - 16900975 * x**12 + 22309287 * x**10 - 14549535 * x**8 + 4849845 * x**6 - 765765 * x**4 + 45045 * x**2 - 429),
+    15: lambda x: (1/2048) * (9694845 * x**15 - 35102025 * x**13 + 50702925 * x**11 - 37182145 * x**9 + 14549535 * x**7 - 2909907 * x**5 + 255255 * x**3 - 6435 * x),
+    16: lambda x: (1/32768) * (300540195 * x**16 - 1163381400 * x**14 + 1825305300 * x**12 - 1487285800 * x**10 + 669278610 * x**8 - 162954792 * x**6 + 19399380 * x**4 - 875160 * x**2 + 6435),
+    17: lambda x: (1/32768) * (583401555 * x**17 - 2404321560 * x**15 + 4071834900 * x**13 - 3650610600 * x**11 + 1859107250 * x**9 - 535422888 * x**7 + 81477396 * x**5 - 5542680 * x**3 + 109395 * x),
+    18: lambda x: (1/65536) * (2268783825 * x**18 - 9917826435 * x**16 + 18032411700 * x**14 - 17644617900 * x**12 + 10039179150 * x**10 - 3346393050 * x**8 + 624660036 * x**6 - 58198140 * x**4 + 2078505 * x**2 - 12155),
+    19: lambda x: (1/65536) * (4418157975 * x**19 - 20419054425 * x**17 + 39671305740 * x**15 - 42075627300 * x**13 + 26466926850 * x**11 - 10039179150 * x**9 + 2230928700 * x**7 - 267711444 * x**5 + 14549535 * x**3 - 230945 * x),
+    20: lambda x: (1/262144) * (34461632205 * x**20 - 167890003050 * x**18 + 347123925225 * x**16 - 396713057400 * x**14 + 273491577450 * x**12 - 116454478140 * x**10 + 30117537450 * x**8 - 4461857400 * x**6 + 334639305 * x**4 - 9699690 * x**2 + 46189),
+}
+        
+        
+class LegendreLayer(nnx.Module):
+    """
+    LegendreLayer class. Corresponds to the Legendre version of KANs and comes in two "flavors":
+        "default": uses the recursion formula to calculate polynomials up to arbitrary degree
+        "exact": uses pre-defined functions for higher efficiency, but cannot scale up to arbitrary degrees
+
+    Attributes:
+        n_in (int):
+            Number of layer's incoming nodes.
+        n_out (int):
+            Number of layer's outgoing nodes.
+        D (int):
+            Degree of Legendre polynomial.
+        flavor (str):
+            One of "default" or "exact" - chooses basis implementation.
+        residual (Union[nnx.Module, None]):
+            Function that is applied on samples to calculate residual activation.
+        rngs (nnx.Rngs):
+            Random number generator state.
+        bias (Union[nnx.Param, None]):
+            Bias parameter if add_bias is True, else None.
+        c_ext (Union[nnx.Param, None]):
+            External weights if external_weights is True, else None.
+        c_basis (nnx.Param):
+            Trainable coefficients for the basis functions.
+        c_res (Union[nnx.Param, None]):
+            Trainable coefficients for residual activation if residual is not None.
+    """
+    
+    def __init__(self, n_in: int = 2, n_out: int = 5, D: int = 5, flavor: Union[str, None] = None,
+                 residual: Union[nnx.Module, None] = None, external_weights: bool = False,
+                 init_scheme: Union[dict, None] = None, add_bias: bool = True, seed: int = 42):
+        """
+        Initializes a LegendreLayer instance.
+        
+        Args:
+            n_in (int):
+                Number of layer's incoming nodes.
+            n_out (int):
+                Number of layer's outgoing nodes.
+            D (int):
+                Degree of Legendre polynomial.
+            flavor (Union[str, None]):
+                One of "default", "modified", or "exact" - chooses basis implementation.
+            residual (Union[nnx.Module, None]):
+                Function that is applied on samples to calculate residual activation.
+            external_weights (bool):
+                Boolean that controls if the trainable weights (n_out, n_in) should be applied to the activations.
+            init_scheme (Union[dict, None]):
+                Dictionary that defines how the trainable parameters of the layer are initialized.
+            add_bias (bool):
+                Boolean that controls wether bias terms are also included during the forward pass or not.
+            seed (int):
+                Random key selection for initializations wherever necessary.
+            
+        Example:
+            >>> layer = LegendreLayer(n_in = 2, n_out = 5, D = 5, flavor = "default", 
+            >>>                       residual = None, external_weights = False, init_scheme = None,
+            >>>                       add_bias = True, seed = 42)
+        """
+        if flavor is None:
+            flavor = "default"
+        elif flavor == "exact":
+            max_deg = max(list(Lg.keys()))
+            if D > max_deg:
+                raise ValueError(f"For method 'exact', the maximum degree cannot exceed {max_deg}.")
+
+        # Setup basic parameters
+        self.n_in = n_in
+        self.n_out = n_out
+        self.D = D
+        self.flavor = flavor
+        self.residual = residual
+
+        # Setup nnx rngs
+        self.rngs = nnx.Rngs(seed)
+
+        # Add bias
+        if add_bias == True:
+            self.bias = nnx.Param(jnp.zeros((n_out,)))
+        else:
+            self.bias = None
+
+        # If external_weights == True, we initialize weights for the activation functions equal to unity
+        if external_weights == True:
+            self.c_ext = nnx.Param(
+                nnx.initializers.ones(
+                    self.rngs.params(), (self.n_out, self.n_in), jnp.float32)
+            )
+        else:
+            self.c_ext = None
+
+        # Initialize the remaining trainable parameters, based on the selected initialization scheme
+        c_res, c_basis = self._initialize_params(init_scheme, seed)
+
+        self.c_basis = nnx.Param(c_basis)
+
+        if residual is not None:
+            self.c_res = nnx.Param(c_res)
+            
+
+    def basis(self, x):
+        """
+        Based on the degree and flavor, the values of the Legendre basis functions are calculated on the input.
+
+        Args:
+            x (jnp.array):
+                Inputs, shape (batch, n_in).
+
+        Returns:
+            leg (jnp.array):
+                Legendre basis functions applied on inputs, shape (batch, n_in, D+1).
+            
+        Example:
+            >>> layer = LegendreLayer(n_in = 2, n_out = 5, D = 5, flavor = "default", 
+            >>>                       residual = None, external_weights = False, init_scheme = None,
+            >>>                       add_bias = True, seed = 42)
+            >>>
+            >>> key = jax.random.key(42)
+            >>> x_batch = jax.random.uniform(key, shape=(100, 2), minval=-1.0, maxval=1.0)
+            >>>
+            >>> output = layer.basis(x_batch)
+        """
+        batch = x.shape[0]
+        # Apply tanh activation
+        x = jnp.tanh(x) # (batch, n_in)
+
+        # Default implementation
+        if self.flavor == "default":
+            # Order 0 is set by default, since we initialize at 1
+            leg = jnp.ones((batch, self.n_in, self.D+1))
+            # Set order 1 as well
+            leg = leg.at[:, :, 1].set(x)
+            # Handle higher orders iteratively
+            for n in range(1, self.D):
+                leg = leg.at[:, :, n+1].set(((2 * n + 1) * x * leg[:, :, n] - n * leg[:, :, n-1]) / (n + 1))
+
+        # Exact calculation of polynomials
+        elif self.flavor == "exact":
+            leg = jnp.stack([Lg[i](x) for i in range(self.D + 1)], axis=-1)  # (batch, n_in, D+1)
+
+        # Other flavor
+        else:
+            raise ValueError(f"Unknown layer flavor: {self.flavor}")
+
+        # Exclude the constant "1" dimension if bias is included
+        if self.bias is not None:
+            return leg[:, :, 1:]
+        else:
+            return leg
+
+
+    def _initialize_params(self, init_scheme, seed):
+        """
+        Initializes the c_res (if residual is activated) and c_basis trainable parameters (only used in __init__)
+
+        Args:
+            init_scheme (Union[dict, None]):
+                Dictionary that defines how the trainable parameters of the layer are initialized. Options: "default", "lecun", "custom"
+        """
+
+        if init_scheme is None:
+            init_scheme = {"type" : "default"}
+
+        init_type = init_scheme.get("type", "default")
+
+        # Case where no residual is used
+        if self.residual is None:
+            c_res = None
+
+        # Find if we have D+1 external dimension (if add_bias = False) or D (if add_bias = True)
+        ext_dim = self.D if self.bias is not None else self.D+1
+
+        # Default initialization
+        if init_type == "default":
+
+            if self.residual is not None:
+                c_res = nnx.initializers.glorot_uniform(in_axis=-1, out_axis=-2)(
+                    self.rngs.params(), (self.n_out, self.n_in), jnp.float32
+                )
+            
+            std = 1.0/jnp.sqrt(self.n_in * ext_dim)
+            c_basis = nnx.initializers.truncated_normal(stddev=std)(
+                self.rngs.params(), (self.n_out, self.n_in, ext_dim), jnp.float32
+            )
+
+        # Custom power law initialization
+        # c_basis ~ N(0, s_b), s_b = const_b / [ (ext_dim+1)^pow_b1 * n_in^pow_b2 ]
+        # c_res ~ N(0, s_r), s_r = const_r / [ (ext_dim+1)^pow_r1 * n_in^pow_r2 ]
+        elif init_type == "power":
+
+            const_b = init_scheme.get("const_b", 1.0)
+            pow_b1 = init_scheme.get("pow_b1", 0.5)
+            pow_b2 = init_scheme.get("pow_b2", 0.5)
+
+            if self.residual is not None:
+                basis_term = ext_dim + 1
+                
+                const_r = init_scheme.get("const_r", 1.0)
+                pow_r1 = init_scheme.get("pow_r1", 0.5)
+                pow_r2 = init_scheme.get("pow_r2", 0.5)
+                
+                std_res = const_r / ( (basis_term**pow_r1) * (self.n_in**pow_r2) )
+                c_res = nnx.initializers.normal(stddev=std_res)(
+                    self.rngs.params(), (self.n_out, self.n_in), jnp.float32
+                )                
+            else:
+                basis_term = ext_dim
+
+            std_b = const_b / ( (basis_term**pow_b1) * (self.n_in**pow_b2) )
+            c_basis = nnx.initializers.normal(stddev=std_b)(
+                self.rngs.params(), (self.n_out, self.n_in, ext_dim), jnp.float32
+            )
+
+        # LeCun-like initialization, where Var[in] = Var[out]
+        elif init_type == "lecun":
+
+            key = jax.random.key(seed)
+
+            # Also get distribution type
+            distrib = init_scheme.get("distribution", "uniform")
+
+            if distrib is None:
+                distrib = "uniform"
+
+            sample_size = init_scheme.get("sample_size", 10000)
+
+            if sample_size is None:
+                sample_size = 10000
+
+            # Generate a sample of points
+            if distrib == "uniform":
+                sample = jax.random.uniform(key, shape=(sample_size,), minval=-1.0, maxval=1.0)
+            elif distrib == "normal":
+                sample = jax.random.normal(key, shape=(sample_size,))
+
+            # Finally get gain
+            gain = init_scheme.get("gain", None)
+            if gain is None:
+                gain = sample.std().item()
+            
+            # Extend the sample to be able to pass through basis
+            sample_ext = jnp.tile(sample[:, None], (1, self.n_in))
+            # Calculate B_m^2(x)
+            y_b = self.basis(sample_ext)
+            # Calculate the average of B_m^2(x)
+            y_b_sq = y_b**2
+            y_b_sq_mean = y_b_sq.mean().item()
+
+            if self.residual is not None:
+                # Variance equipartitioned across all terms
+                scale = self.n_in * (ext_dim + 1)
+                # Apply the residual function
+                y_res = self.residual(sample)
+                # Calculate the average of residual^2(x)
+                y_res_sq = y_res**2
+                y_res_sq_mean = y_res_sq.mean().item()
+
+                std_res = gain/jnp.sqrt(scale*y_res_sq_mean)
+                c_res = nnx.initializers.normal(stddev=std_res)(self.rngs.params(), (self.n_out, self.n_in), jnp.float32)
+            
+            else:
+                # Variance equipartitioned across G+k terms
+                scale = self.n_in * ext_dim
+
+            std_b = gain/jnp.sqrt(scale*y_b_sq_mean)
+            c_basis = nnx.initializers.normal(stddev=std_b)(
+                self.rngs.params(), (self.n_out, self.n_in, ext_dim), jnp.float32
+            )
+
+        # Glorot-like initialization, where we attempt to balance Var[in] = Var[out] and Var[δin] = Var[δout]
+        elif init_type == "glorot":
+
+            key = jax.random.key(seed)
+
+            # Also get distribution type
+            distrib = init_scheme.get("distribution", "uniform")
+
+            if distrib is None:
+                distrib = "uniform"
+
+            sample_size = init_scheme.get("sample_size", 10000)
+
+            if sample_size is None:
+                sample_size = 10000
+
+            # Generate a sample of points
+            if distrib == "uniform":
+                sample = jax.random.uniform(key, shape=(sample_size,), minval=-1.0, maxval=1.0)
+            elif distrib == "normal":
+                sample = jax.random.normal(key, shape=(sample_size,))
+
+            # Finally get gain
+            gain = init_scheme.get("gain", None)
+            if gain is None:
+                gain = sample.std().item()
+
+            # Extend the sample to be able to pass through basis
+            sample_ext = jnp.tile(sample[:, None], (1, self.n_in))
+
+            # ------------- Basis function gradient ----------------------
+            # Define a scalar version of the basis function
+            def basis_scalar(x):
+                return self.basis(jnp.array([[x]]))[0, 0, :]
+
+            # Create a Jacobian function for the scalar wrapper
+            jac_basis = jax.jacobian(basis_scalar)
+
+            num_batches = 20
+            batch_size = sample_size // num_batches
+            grad_sq_accum = 0.0
+            
+            for i in range(num_batches):
+                batch = sample[i*batch_size:(i+1)*batch_size]
+                grad_batch = jax.vmap(jac_basis)(batch)
+                grad_sq_accum += (grad_batch**2).sum()
+
+            # Calculate E[B'_m^2(x)]
+            grad_b_sq_mean = grad_sq_accum / (sample_size * ext_dim)
+            # ------------------------------------------------------------
+            
+            # Calculate E[B_m^2(x)]
+            y_b = self.basis(sample_ext)
+            y_b_sq = y_b**2
+            y_b_sq_mean = y_b_sq.mean().item()
+            
+            # Deal with residual if available
+            if self.residual is not None:
+                # Variance equipartitioned across all terms
+                scale_in = self.n_in * (ext_dim + 1)
+                scale_out = self.n_out * (ext_dim + 1)
+
+                # ------------- Residual function gradient ----------------------
+                # Similar idea to the basis function
+                def r(x):
+                    return self.residual(x)
+
+                jac_res = jax.jacobian(r)
+                
+                grad_res = jax.vmap(jac_res)(sample)
+                # ------------------------------------------------------------
+                
+                # Calculate E[R^2(x)]
+                y_res = self.residual(sample)
+                y_res_sq = y_res**2
+                y_res_sq_mean = y_res_sq.mean().item()
+
+                # Calculate E[R'^2(x)]
+                grad_res_sq = grad_res**2
+                grad_res_sq_mean = grad_res_sq.mean().item()
+
+                std_res = gain*jnp.sqrt(2.0 / (scale_in*y_res_sq_mean + scale_out*grad_res_sq_mean))
+                c_res = nnx.initializers.normal(stddev=std_res)(self.rngs.params(), (self.n_out, self.n_in), jnp.float32)
+            
+            else:
+                # Variance equipartitioned across G+k terms
+                scale_in = self.n_in * ext_dim
+                scale_out = self.n_out * ext_dim
+
+            std_b = gain*jnp.sqrt(2.0 / (scale_in*y_b_sq_mean + scale_out*grad_b_sq_mean))
+            c_basis = nnx.initializers.normal(stddev=std_b)(
+                self.rngs.params(), (self.n_out, self.n_in, ext_dim), jnp.float32
+            )
+
+        # Glorot-like initialization as presented in the paper "Towards Deep Physics-Informed Kolmogorov-Arnold Networks"
+        # The main difference is that we do not aggregate over all sigmas, each mode has its own, hence "fine grained"
+        elif init_type == "glorot_fine":
+
+            key = jax.random.key(seed)
+
+            # Also get distribution type
+            distrib = init_scheme.get("distribution", "uniform")
+
+            if distrib is None:
+                distrib = "uniform"
+
+            sample_size = init_scheme.get("sample_size", 10000)
+
+            if sample_size is None:
+                sample_size = 10000
+
+            # Generate a sample of points
+            if distrib == "uniform":
+                sample = jax.random.uniform(key, shape=(sample_size,), minval=-1.0, maxval=1.0)
+            elif distrib == "normal":
+                sample = jax.random.normal(key, shape=(sample_size,))
+
+            # Finally get gain
+            gain = init_scheme.get("gain", None)
+            if gain is None:
+                gain = sample.std().item()
+
+            # Extend the sample to be able to pass through basis
+            sample_ext = jnp.tile(sample[:, None], (1, self.n_in))
+
+            # ------------- Basis functions ------------------------
+
+            # μ⁽0⁾ₘ (⟨B_m²⟩) 
+            B      = self.basis(sample_ext)
+            mu0    = (B**2).mean(axis=(0, 1))
+
+            # μ⁽1⁾ₘ (⟨B'_m²⟩)            
+
+            # Define a scalar version of the basis function
+            basis_scalar = lambda x: self.basis(jnp.array([[x]]))[0, 0, :]
+
+            jac_basis = jax.jacrev(basis_scalar)
+            mu1  = (jax.vmap(jac_basis)(sample)**2).mean(axis=0)
+
+            # ------------- Residual function ----------------------
+            # Deal with residual if available - same as simple glorot
+            if self.residual is not None:
+                # Variance equipartitioned across all terms
+                scale_in = self.n_in * (ext_dim + 1)
+                scale_out = self.n_out * (ext_dim + 1)
+
+                # ------------- Residual function gradient ----------------------
+                # Similar idea to the basis function
+                def r(x):
+                    return self.residual(x)
+
+                jac_res = jax.jacobian(r)
+                
+                grad_res = jax.vmap(jac_res)(sample)
+                # ------------------------------------------------------------
+                
+                # Calculate E[R^2(x)]
+                y_res = self.residual(sample)
+                y_res_sq = y_res**2
+                y_res_sq_mean = y_res_sq.mean().item()
+
+                # Calculate E[R'^2(x)]
+                grad_res_sq = grad_res**2
+                grad_res_sq_mean = grad_res_sq.mean().item()
+
+                std_res = gain*jnp.sqrt(2.0 / (scale_in*y_res_sq_mean + scale_out*grad_res_sq_mean))
+                c_res = nnx.initializers.normal(stddev=std_res)(self.rngs.params(), (self.n_out, self.n_in), jnp.float32)
+            
+            else:
+                # Variance equipartitioned across G+k terms
+                scale_in = self.n_in * ext_dim
+                scale_out = self.n_out * ext_dim
+
+            sigma_vec = gain * jnp.sqrt(1.0 / (scale_in*mu0 + scale_out*mu1))
+
+            noise = nnx.initializers.normal(stddev=1.0)(
+                self.rngs.params(), (self.n_out, self.n_in, ext_dim), jnp.float32
+            )
+
+            c_basis  = noise * sigma_vec
+
+        # Custom initialization, where the user inputs pre-determined arrays
+        elif init_type == "custom":
+            
+            if self.residual is not None:
+                c_res = init_scheme.get("c_res", None)
+
+            c_basis = init_scheme.get("c_basis", None)
+            
+        else:
+            raise ValueError(f"Unknown initialization method: {init_type}")
+
+        return c_res, c_basis
+
+
+    def update_degree(self, x, degree_new):
+        """
+        Update the polynomial degree for LegendreLayer.
+        
+        For the case of LegendreKANs there is no concept of grid. However, a 
+        fine-graining approach can be followed by progressively increasing 
+        the degree of the polynomials. This method increases the degree while
+        preserving the function approximation via least squares fitting.
+
+        Args:
+            x (jnp.array):
+                Inputs, shape (batch, n_in). Used for fitting new coefficients.
+            degree_new (int):
+                New Legendre polynomial degree.
+            
+        Example:
+            >>> layer = LegendreLayer(n_in = 2, n_out = 5, D = 5, flavor = "default", 
+            >>>                       residual = None, external_weights = False, init_scheme = None,
+            >>>                       add_bias = True, seed = 42)
+            >>>
+            >>> key = jax.random.key(42)
+            >>> x_batch = jax.random.uniform(key, shape=(100, 2), minval=-1.0, maxval=1.0)
+            >>>
+            >>> layer.update_degree(x=x_batch, degree_new=8)
+        """
+
+        # Apply the inputs to the current grid to acquire y = Sum(ciBi(x)), where ci are
+        # the current coefficients and Bi(x) are the current Legendre basis functions
+        Bi = self.basis(x).transpose(1, 0, 2) # (n_in, batch, D+1)
+        ci = self.c_basis[...].transpose(1, 2, 0) # (n_in, D+1, n_out)
+        ciBi = jnp.einsum('ijk,ikm->ijm', Bi, ci) # (n_in, batch, n_out)
+
+        # Update the degree order
+        self.D = degree_new
+
+        # Get the Bj(x) for the new degree order
+        Bj = self.basis(x).transpose(1, 0, 2) # (n_in, batch, degree_new+1)
+
+        # Solve for the new coefficients
+        cj = solve_full_lstsq(Bj, ciBi) # (n_in, degree_new+1, n_out)
+        # Cast into shape (n_out, n_in, degree_new+1)
+        cj = cj.transpose(2, 0, 1)
+
+        self.c_basis = nnx.Param(cj)
+
+
+    def __call__(self, x):
+        """
+        The layer's forward pass.
+
+        Args:
+            x (jnp.array):
+                Inputs, shape (batch, n_in).
+
+        Returns:
+            y (jnp.array):
+                Output of the forward pass, shape (batch, n_out).
+            
+        Example:
+            >>> layer = LegendreLayer(n_in = 2, n_out = 5, D = 5, flavor = "default", 
+            >>>                       residual = None, external_weights = False, init_scheme = None,
+            >>>                       add_bias = True, seed = 42)
+            >>>
+            >>> key = jax.random.key(42)
+            >>> x_batch = jax.random.uniform(key, shape=(100, 2), minval=-1.0, maxval=1.0)
+            >>>
+            >>> output = layer(x_batch)
+        """
+        
+        batch = x.shape[0]
+        
+        # Calculate basis activations
+        Bi = self.basis(x) # (batch, n_in, D+1)
+        act = Bi.reshape(batch, -1) # (batch, n_in * (D+1))
+
+        # Check if external_weights == True
+        if self.c_ext is not None:
+            act_w = self.c_basis[...] * self.c_ext[..., None] # (n_out, n_in, D+1)
+        else:
+            act_w = self.c_basis[...]
+        
+        # Calculate coefficients
+        act_w = act_w.reshape(self.n_out, -1) # (n_out, n_in * (D+1))
+
+        y = jnp.matmul(act, act_w.T) # (batch, n_out)
+
+        # Check if there is a residual function
+        if self.residual is not None:
+            # Calculate residual activation
+            res = self.residual(x) # (batch, n_in)
+            # Multiply by trainable weights
+            res_w = self.c_res[...] # (n_out, n_in)
+            full_res = jnp.matmul(res, res_w.T) # (batch, n_out)
+
+            y += full_res # (batch, n_out)
+
+        if self.bias is not None:
+            y += self.bias[...] # (batch, n_out)
+        
+        return y

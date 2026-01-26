@@ -1,0 +1,9 @@
+jax[cuda12]>=0.8.1
+numpy>=2.3.5
+scipy>=1.16.3
+optax>=0.2.6
+flax>=0.12.1
+jupyterlab==4.4.3
+matplotlib
+scikit-learn
+pandas

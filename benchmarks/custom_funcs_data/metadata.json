@@ -1,0 +1,166 @@
+{
+  "f1": {
+    "name": "Sharp Peak 2D",
+    "category": "localized",
+    "n_in": 2,
+    "bounds": [
+      [
+        -1.0,
+        1.0
+      ],
+      [
+        -1.0,
+        1.0
+      ]
+    ],
+    "description": "Sharp Gaussian peak on smooth background"
+  },
+  "f2": {
+    "name": "Step Function 1D",
+    "category": "localized",
+    "n_in": 1,
+    "bounds": [
+      [
+        -1.0,
+        1.0
+      ]
+    ],
+    "description": "Smoothed step function with steep transition"
+  },
+  "f3": {
+    "name": "Multiple Peaks 2D",
+    "category": "localized",
+    "n_in": 2,
+    "bounds": [
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ]
+    ],
+    "description": "Three Gaussian peaks at different locations"
+  },
+  "f4": {
+    "name": "Runge Function 1D",
+    "category": "localized",
+    "n_in": 1,
+    "bounds": [
+      [
+        -1.0,
+        1.0
+      ]
+    ],
+    "description": "Classic Runge function with sharp central peak"
+  },
+  "f5": {
+    "name": "Chirp Function 1D",
+    "category": "multiscale",
+    "n_in": 1,
+    "bounds": [
+      [
+        0.0,
+        1.0
+      ]
+    ],
+    "description": "Sinusoid with spatially varying frequency"
+  },
+  "f6": {
+    "name": "Boundary Layer 1D",
+    "category": "boundary",
+    "n_in": 1,
+    "bounds": [
+      [
+        0.0,
+        1.0
+      ]
+    ],
+    "description": "Sharp exponential transition near boundary"
+  },
+  "f7": {
+    "name": "Corner Singularity 2D",
+    "category": "boundary",
+    "n_in": 2,
+    "bounds": [
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ]
+    ],
+    "description": "High curvature near corner origin"
+  },
+  "f8": {
+    "name": "Double Boundary Layer 1D",
+    "category": "boundary",
+    "n_in": 1,
+    "bounds": [
+      [
+        0.0,
+        1.0
+      ]
+    ],
+    "description": "Sharp transitions at both boundaries"
+  },
+  "f9": {
+    "name": "6D Sparse Interaction",
+    "category": "highdim",
+    "n_in": 6,
+    "bounds": [
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ]
+    ],
+    "description": "Sparse pairwise interactions in 6D"
+  },
+  "f10": {
+    "name": "4D Ridge",
+    "category": "highdim",
+    "n_in": 4,
+    "bounds": [
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        1.0
+      ]
+    ],
+    "description": "1D ridge structure embedded in 4D"
+  }
+}
