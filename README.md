@@ -1,6 +1,6 @@
 # Introduction
 
-This repository contains the code required to reproduce the experimental results and plots for the paper "[A Dynamic Framework for Grid Adaptation in Kolmogorov–Arnold Networks](https://arxiv.org/abs/TODO)".
+This repository contains the code required to reproduce the experimental results and plots for the paper "[A Dynamic Framework for Grid Adaptation in Kolmogorov–Arnold Networks](https://arxiv.org/abs/2601.18672)".
 
 
 # Getting Started
@@ -39,13 +39,12 @@ If the code and/or results presented in this work helped you for your own work, 
 
 ```
 @article{kan_grid,
-   title={A Dynamic Framework for Grid Adaptation in Kolmogorov–Arnold Networks},
-   author={Rigas, Spyros and Papaioannou, Thanasis and Trakadas, Panagiotis and Alexandridis, Georgios},
-   year={2026},
-   eprint={TODO},
-   archivePrefix={arXiv},
-   primaryClass={cs.LG},
-   url={https://arxiv.org/abs/TODO}, 
+   title = {A Dynamic Framework for Grid Adaptation in Kolmogorov–Arnold Networks},
+   author = {Rigas, Spyros and Papaioannou, Thanasis and Trakadas, Panagiotis and Alexandridis, Georgios},
+   year = {2026},
+   eprint = {2601.18672},
+   archivePrefix = {arXiv},
+   primaryClass = {cs.LG},
+   url = {https://arxiv.org/abs/2601.18672}, 
 }
-
 ```
